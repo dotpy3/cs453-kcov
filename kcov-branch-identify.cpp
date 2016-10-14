@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "clang/AST/ASTConsumer.h"
+#include "clang/AST/ASTContext.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/FileManager.h"
@@ -35,16 +36,34 @@ template<typename T> string int_to_string(T i) {
 class MyASTVisitor : public RecursiveASTVisitor<MyASTVisitor>
 {
 private:
-	int nbStmt;
+	int nbStmt, nbBranches;
+    ASTContext *context;
+
+    SourceManager& getSrcMngr() {
+        return context->getSourceManager();
+    }
 
 public:
-	MyASTVisitor() {
+	MyASTVisitor(CompilerInstance* CI) {
 		nbStmt = 0;
+        nbBranches = 0;
+        context = &(CI->getASTContext());
 	}
 
-	bool PrintStmtDescription(string stmtType) {
-		llvm::outs() << "\t" << stmtType << "\tID: " << int_to_string<int>(nbStmt++) << "\n";
+	bool PrintStmtDescription(string stmtType, Stmt* stmt) {
+		llvm::outs() << "\t" << stmtType << "\tID: " << int_to_string<int>(nbStmt++);
+        SourceManager& mngr = getSrcMngr();
+        unsigned int lineNum = mngr.getExpansionLineNumber(stmt->getLocStart());
+        unsigned int colNum = mngr.getExpansionColumnNumber(stmt->getLocStart());
+        llvm::outs() << "\tLine: " << int_to_string<unsigned int>(lineNum);
+        llvm::outs() << "\tColumn: " << int_to_string<unsigned int>(colNum);
+        llvm::outs() << "\tFilename: " << (mngr.getFilename(stmt->getLocStart())).str() << "\n";
+        return true;
 	}
+
+    string GetStringNbBranches() {
+        return "Total number of branches: " + int_to_string<int>(nbBranches) + "\n";
+    }
 
 	bool hasImplicitDefault(SwitchStmt *s) {
         SwitchCase* cases = s->getSwitchCaseList();
@@ -64,30 +83,38 @@ public:
         // llvm::outs() << "On visite un statement\n";
     	if (ForStmt *forS = dyn_cast<ForStmt>(s)) {
     		// For Statement
-    		PrintStmtDescription("For");
+    		PrintStmtDescription("For", forS);
+            nbBranches += 2;
     	} else if (IfStmt *ifS = dyn_cast<IfStmt>(s)) {
     		// For Statement
-    		PrintStmtDescription("If");
+    		PrintStmtDescription("If", ifS);
+            nbBranches += 2;
+
     	} else if (DoStmt *doS = dyn_cast<DoStmt>(s)) {
     		// Do Statement
-    		PrintStmtDescription("Do");
+    		PrintStmtDescription("Do", doS);
+            nbBranches += 2;
     	} else if (CaseStmt *swC = dyn_cast<CaseStmt>(s)) {
     		// Switch Case Statement
-    		PrintStmtDescription("Case");
+    		PrintStmtDescription("Case", swC);
+            nbBranches += 1;
     	} else if (ConditionalOperator *ternS = dyn_cast<ConditionalOperator>(s)) {
             // Switch Case Statement
-            PrintStmtDescription("?:");
+            PrintStmtDescription("?:", ternS);
+            nbBranches += 2;
         } else if (SwitchStmt *swS = dyn_cast<SwitchStmt>(s)) {
     		// Switch Statement
     		if (hasImplicitDefault(swS)) {
-    			PrintStmtDescription("ImpDef.");
+    			PrintStmtDescription("ImpDef.", swS);
     		}
+            nbBranches += 1;
     	} else if (WhileStmt *whS = dyn_cast<WhileStmt>(s)) {
     		// Switch Statement
-    		PrintStmtDescription("While");
+    		PrintStmtDescription("While", whS);
+            nbBranches += 2;
     	} else if (DefaultStmt *defS = dyn_cast<DefaultStmt>(s)) {
     		// Switch Statement
-    		PrintStmtDescription("Default");
+    		PrintStmtDescription("Default", defS);
     	}
         return true;
     }
@@ -104,7 +131,7 @@ public:
 class MyASTConsumer : public ASTConsumer
 {
 public:
-    MyASTConsumer() : Visitor() 
+    MyASTConsumer(CompilerInstance* CI) : Visitor(CI)
     {
     }
 
@@ -114,6 +141,10 @@ public:
             Visitor.TraverseDecl(*b);
         }
         return true;
+    }
+
+    string GetStringNbBranches() {
+        return Visitor.GetStringNbBranches();
     }
 
 private:
@@ -206,10 +237,12 @@ int main(int argc, char *argv[])
     TheCompInst.getDiagnosticClient().BeginSourceFile(TheCompInst.getLangOpts(),&TheCompInst.getPreprocessor());
     
     // Create an AST consumer instance which is going to get called by ParseAST.
-    MyASTConsumer TheConsumer;
+    MyASTConsumer TheConsumer(&TheCompInst);
 
     // Parse the file to AST, registering our consumer as the AST consumer.
     ParseAST(TheCompInst.getPreprocessor(), &TheConsumer, TheCompInst.getASTContext());
+
+    llvm::outs() << TheConsumer.GetStringNbBranches();
 
     return 0;
 }
