@@ -42,10 +42,13 @@ class Branch {
 private:
     unsigned int lineNumber;
     string condition;
+    bool hasElseBranch;
 public:
-    Branch(Stmt* stmt, SourceManager& srcmgr, string cn) : condition(cn) {
+    Branch(Stmt* stmt, SourceManager& srcmgr, string cn, bool elseBr = true) : condition(cn), hasElseBranch(elseBr) {
         lineNumber = srcmgr.getExpansionLineNumber(stmt->getLocStart());
     }
+
+    bool hasElseBr() { return hasElseBranch; }
 
     string getCondition() { return condition; }
     unsigned int getLineNumber() { return lineNumber; }
@@ -57,8 +60,9 @@ private:
 	int nbStmt;
     ASTContext *context;
     vector<Branch> branches;
-    bool firstFuncInstantation;
+    bool firstFuncInstantation, isInMain, hasFoundReturn;
     SourceLocation funcInstantation, mainFuncInstantiaton;
+    vector<SourceLocation> returnLocations;
     string radical;
     LangOptions lOpts;
 
@@ -71,8 +75,11 @@ public:
 		nbStmt = 0;
         context = &(CI->getASTContext());
         branches = vector<Branch>();
+        returnLocations = vector<SourceLocation>();
         firstFuncInstantation = false;
         lOpts = CI->getLangOpts();
+        isInMain = false;
+        hasFoundReturn = false;
 	}
 
 	bool hasImplicitDefault(SwitchStmt *s) {
@@ -132,14 +139,14 @@ public:
             //addBranch(new Branch(swC, getSrcMngr(), swC->getCond()));
             //nbBranches += 1;
             // AddSimpleConditionCoverageEvaluation(addBranch(Branch(swC, getSrcMngr(), "case")), swC->getSubStmt()->child_begin()->getLocStart());
-            AddSimpleConditionCoverageEvaluation(addBranch(Branch(swC, getSrcMngr(), TheRewriter.ConvertToString(swC->getLHS()))), swC->getSubStmt()->child_begin()->getLocStart());
+            AddSimpleConditionCoverageEvaluation(addBranch(Branch(swC, getSrcMngr(), TheRewriter.ConvertToString(swC->getLHS()), false)), swC->getSubStmt()->child_begin()->getLocStart());
     	} else if (ConditionalOperator *ternS = dyn_cast<ConditionalOperator>(s)) {
             // Conditional Operator
             AddCompleteConditionCoverageEvaluation(addBranch(Branch(ternS, getSrcMngr(), TheRewriter.ConvertToString(ternS->getCond()))), ternS->getCond());
         } else if (SwitchStmt *swS = dyn_cast<SwitchStmt>(s)) {
     		// Switch Statement
     		if (hasImplicitDefault(swS)) {
-                unsigned int nbSwBr = addBranch(Branch(swS, getSrcMngr(), "default"));
+                unsigned int nbSwBr = addBranch(Branch(swS, getSrcMngr(), "default", false));
                 string addedCCode = "\ndefault: VisitedThenBranch(";
                 addedCCode += int_to_string<unsigned int>(nbSwBr);
                 addedCCode += ");\nbreak;\n";
@@ -150,8 +157,13 @@ public:
             AddCompleteConditionCoverageEvaluation(addBranch(Branch(whS, getSrcMngr(), TheRewriter.ConvertToString(whS->getCond()))), whS->getCond());
     	} else if (DefaultStmt *defS = dyn_cast<DefaultStmt>(s)) {
     		// Default Statement
-            AddSimpleConditionCoverageEvaluation(addBranch(Branch(defS, getSrcMngr(), "default")), defS->getSubStmt()->child_begin()->getLocStart());
-    	}
+            AddSimpleConditionCoverageEvaluation(addBranch(Branch(defS, getSrcMngr(), "default", false)), defS->getSubStmt()->child_begin()->getLocStart());
+    	} else if (ReturnStmt *retS = dyn_cast<ReturnStmt>(s)) {
+            // Return Statement
+            if (isInMain) {
+                returnLocations.push_back(retS->getLocStart());
+            }
+        }
         return true;
     }
     
@@ -164,8 +176,12 @@ public:
         }
         if (f->isMain()) {
             llvm::outs() << "Main function found - adding branch coverage evaluation result...\n";
+            // Adding a WriteResult() in case function is wholy executed without executing any return
             TheRewriter.InsertTextBefore(f->getSourceRange().getEnd(), "\nWriteResult();\n");
             mainFuncInstantiaton = f->getBody()->child_begin()->getLocStart();
+            isInMain = true;
+        } else {
+            isInMain = false;
         }
         return true;
     }
@@ -185,14 +201,15 @@ public:
         string StructCreation = "struct BranchTest {\n";
         StructCreation += "\tunsigned int lineNumber;\n";
         StructCreation += "\tunsigned int thenBrExec;\n";
+        StructCreation += "\tunsigned int elseBr;\n";
         StructCreation += "\tunsigned int elseBrExec;\n";
         StructCreation += "\tchar* condExpression;\n";
         StructCreation += "};\n";
 
         string BranchValidator = "int BranchValidator(int condition, unsigned int nbBr) {\n\tif (condition) {\n\t\tVisitedThenBranch(nbBr);\n\t} else {\n\t\tVisitedElseBranch(nbBr);\n\t}\n\treturn condition;\n}\n";
 
-        string BranchTestConstructor = "void InitBranch(struct BranchTest* br, unsigned int nb, unsigned int givenLineNumber, char* givenCondExpression) {\n";
-        BranchTestConstructor += "\tbr[nb].lineNumber = givenLineNumber;\n\tbr[nb].condExpression = givenCondExpression;\n\tbr[nb].thenBrExec = 0;\n";
+        string BranchTestConstructor = "void InitBranch(struct BranchTest* br, unsigned int nb, unsigned int givenLineNumber, unsigned int hasElseBranch, char* givenCondExpression) {\n";
+        BranchTestConstructor += "\tbr[nb].lineNumber = givenLineNumber;\n\tbr[nb].condExpression = givenCondExpression;\n\tbr[nb].thenBrExec = 0;\n\tbr[nb].elseBr = hasElseBranch;\n";
         BranchTestConstructor += "\tbr[nb].elseBrExec = 0;\n}\n";
 
         string BranchThenVisitAcceptance = "int VisitedThenBranch(unsigned int brId) {\n";
@@ -229,6 +246,7 @@ public:
             }
             BranchesInit += "InitBranch(all_branches, "; BranchesInit += int_to_string<unsigned int>(i); BranchesInit += ", ";
             BranchesInit += int_to_string<unsigned int>(branches[i].getLineNumber()); BranchesInit += ", ";
+            BranchesInit += branches[i].hasElseBr() ? "1, " : "0, ";
             BranchesInit += "BranchesConditions["; BranchesInit += int_to_string<unsigned int>(i) + "]);\n";
         }
 
@@ -236,12 +254,19 @@ public:
 
         string WriteResult = "void WriteResult() {\n\tFILE* output = fopen(\"" + radical + "-cov-measure.txt\"";
         WriteResult += ", \"w+\");\n\tfprintf(output, \"Line\\tThen\\tElse\\tCondition\\n\");\n";
-        WriteResult += "\tunsigned int j;\n\tfor (j = 0; j < ";
+        WriteResult += "\tunsigned int j, k;\n\tfloat nbCovered = 0.0, nbTotal = 0.0;\n\tfor (j = 0; j < ";
         WriteResult += int_to_string<int>(branches.size());
         WriteResult += "; j++) {\n";
         WriteResult += "\t\tfprintf(output, \"%d\\t\", all_branches[j].lineNumber);\n\t\tfprintf(output, \"%d\\t\", all_branches[j].thenBrExec);\n";
         WriteResult += "\t\tfprintf(output, \"%d\\t\", all_branches[j].elseBrExec);\n\t\tfprintf(output, all_branches[j].condExpression);\n";
-        WriteResult += "\t\tfprintf(output, \"\\n\");\n\t}\n\tfclose(output);\n}\n";
+        WriteResult += "\t\tfprintf(output, \"\\n\");\n\t\n}";
+        WriteResult += "\tfor (k = 0; k < ";
+        WriteResult += int_to_string<int>(branches.size());
+        WriteResult += "; k++) {\n\t\tif (all_branches[k].elseBr) {\n";
+        WriteResult += "\t\t\tnbTotal += 1;\n\t\t\tnbCovered += (all_branches[k].elseBrExec > 0 ? 1.0 : 0.0);\n";
+        WriteResult += "\t\t}\n\t\tnbCovered += (all_branches[k].thenBrExec > 0 ? 1.0 : 0.0);\n\t\tnbTotal += 1;\n\t}\n";
+        WriteResult += "\tfprintf(output, \"Coverage: %f/%f (%f\\\%)\\n\", nbCovered, nbTotal, nbCovered * 100.0 / nbTotal);\n";
+        WriteResult += "\tfclose(output);\n}\n";
 
         TheRewriter.InsertTextBefore(begin, BranchValidator);
         TheRewriter.InsertTextBefore(begin, WriteResult);
@@ -253,6 +278,10 @@ public:
         TheRewriter.InsertTextBefore(begin, NumberOfBranches);
         TheRewriter.InsertTextBefore(begin, StructCreation);
         //TheRewriter.InsertTextBefore(begin, BasicInclude);
+
+        for (unsigned int l = 0; l < returnLocations.size(); l++) {
+            TheRewriter.InsertTextAfter(returnLocations[l], "WriteResult();\n");
+        }
 
         return true;
     }
